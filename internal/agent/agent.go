@@ -10,6 +10,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/michaelpeterswa/lfpweather-agent/internal/usage"
 )
 
 // EventType classifies a streamed agent event.
@@ -48,6 +49,7 @@ type Agent struct {
 	system   string
 	maxTok   int64
 	maxTurns int
+	usage    *usage.Tracker
 }
 
 // Options configures an Agent.
@@ -58,6 +60,7 @@ type Options struct {
 	MaxTurns     int
 	MCPTools     []mcp.Tool
 	ToolExecutor toolCaller
+	Usage        *usage.Tracker // optional; nil disables accounting
 }
 
 // New builds an Agent. The Anthropic API key is read from the environment by
@@ -71,6 +74,7 @@ func New(client anthropic.Client, opts Options) *Agent {
 		system:   opts.System,
 		maxTok:   opts.MaxTokens,
 		maxTurns: opts.MaxTurns,
+		usage:    opts.Usage,
 	}
 }
 
@@ -80,6 +84,9 @@ func New(client anthropic.Client, opts Options) *Agent {
 func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userText string, emit func(Event)) ([]anthropic.MessageParam, error) {
 	history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 
+	var run usage.Snapshot
+	completed := false
+
 	for turn := 0; turn < a.maxTurns; turn++ {
 		params := anthropic.MessageNewParams{
 			Model:     anthropic.Model(a.model),
@@ -88,7 +95,14 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 			Tools:     a.toolDefs,
 		}
 		if a.system != "" {
-			params.System = []anthropic.TextBlockParam{{Text: a.system}}
+			// Cache the system prompt and, in render order, the tool schemas
+			// that precede it. This fixed prefix is re-sent on every turn of the
+			// tool-use loop and every message of a session, so caching it cuts
+			// input cost sharply.
+			params.System = []anthropic.TextBlockParam{{
+				Text:         a.system,
+				CacheControl: anthropic.NewCacheControlEphemeralParam(),
+			}}
 		}
 
 		stream := a.client.Messages.NewStreaming(ctx, params)
@@ -108,9 +122,17 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 			return history, fmt.Errorf("model stream: %w", err)
 		}
 
+		a.usage.Record(msg.Usage.InputTokens, msg.Usage.OutputTokens, msg.Usage.CacheReadInputTokens, msg.Usage.CacheCreationInputTokens)
+		run.Requests++
+		run.InputTokens += msg.Usage.InputTokens
+		run.OutputTokens += msg.Usage.OutputTokens
+		run.CacheReadTokens += msg.Usage.CacheReadInputTokens
+		run.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
+
 		history = append(history, msg.ToParam())
 
 		if msg.StopReason != anthropic.StopReasonToolUse {
+			completed = true
 			break
 		}
 
@@ -126,6 +148,20 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 			results = append(results, anthropic.NewToolResultBlock(tu.ID, out, isErr))
 		}
 		history = append(history, anthropic.NewUserMessage(results...))
+	}
+
+	slog.Info("llm usage",
+		slog.Int64("turns", run.Requests),
+		slog.Int64("input_tokens", run.InputTokens),
+		slog.Int64("output_tokens", run.OutputTokens),
+		slog.Int64("cache_read_tokens", run.CacheReadTokens),
+		slog.Int64("cache_creation_tokens", run.CacheCreationTokens),
+		slog.Bool("completed", completed),
+	)
+
+	if !completed {
+		// The loop hit the turn cap while the model still wanted tools.
+		emit(Event{Type: EventError, Text: "reached the step limit for one question; ask a narrower question"})
 	}
 
 	emit(Event{Type: EventDone})

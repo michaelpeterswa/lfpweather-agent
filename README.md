@@ -27,6 +27,7 @@ egress off the cluster is the Anthropic API call.
 |---|---|
 | `POST /v1/chat` | Stream the answer to one user message as Server-Sent Events. Body: `{"session_id": "...", "message": "..."}`. |
 | `GET /healthz`, `GET /readyz` | Liveness / readiness. |
+| `GET /usage` | Cumulative token usage since process start (JSON) — basis for budget monitoring. |
 
 ### `POST /v1/chat` events
 
@@ -54,7 +55,10 @@ All configuration is environment variables.
 | `MCP_URL` | — (required) | Streamable-HTTP endpoint of lfpweather-mcp, e.g. `http://lfpweather-mcp.lfpweather.svc.cluster.local:80/mcp`. |
 | `MCP_BEARER_TOKEN` | — | Bearer token for the MCP server, if it requires one. |
 | `SYSTEM_PROMPT` | built-in | Override the system prompt. |
-| `MAX_TURNS` | `8` | Max tool-use iterations per user message. |
+| `MAX_TURNS` | `8` | Max tool-use iterations per user message (bounds worst-case token spend). |
+| `RATE_LIMIT_RPM` | `20` | Per-IP requests per minute on `/v1/chat`. `<= 0` disables limiting. |
+| `RATE_LIMIT_BURST` | `5` | Per-IP burst size. |
+| `TRUST_FORWARDED_FOR` | `false` | Use the left-most `X-Forwarded-For` as the client IP. Enable only behind a trusted proxy/broker. |
 | `SESSION_TTL` | `30m` | Idle lifetime of an in-memory conversation. |
 | `REQUEST_TIMEOUT` | `90s` | End-to-end bound on one user message. |
 | `SHUTDOWN_TIMEOUT` | `15s` | Graceful drain on SIGTERM. |
@@ -80,9 +84,19 @@ curl -N http://localhost:8091/v1/chat \
   -d '{"session_id":"tab-1","message":"what is the record high this year?"}'
 ```
 
+## Cost controls
+
+- **Prompt caching** — the system prompt and tool schemas (the fixed prefix that
+  is re-sent on every turn of the tool-use loop) are cached, cutting input cost.
+- **Usage accounting** — every model response's token usage is tracked; the
+  running total is served at `GET /usage`.
+- **Bounds** — `MAX_TURNS` caps the tool loop, `ANTHROPIC_MAX_TOKENS` caps output
+  per turn, and per-IP rate limiting caps request frequency.
+
 ## Status
 
-First cut of the runtime: the Claude tool-use loop, MCP client, session store,
-and streaming HTTP API. Not yet included (follow-ups): OpenTelemetry via
-`ootel` to match the other services, request rate limiting / abuse controls,
-and CI + release automation.
+Runtime with the Claude tool-use loop, MCP client, session store, streaming HTTP
+API, prompt caching, usage accounting, and per-IP rate limiting. Not yet included
+(follow-ups): OpenTelemetry via `ootel` to match the other services, a global
+daily token budget with graceful degrade (planned for the broker, which sees all
+sessions), and CI + release automation.

@@ -33,6 +33,14 @@ type Config struct {
 	// MaxTurns bounds the tool-use loop per user message.
 	MaxTurns int `env:"MAX_TURNS" envDefault:"8"`
 
+	// Per-IP rate limiting on POST /v1/chat. RateLimitRPM <= 0 disables it.
+	RateLimitRPM   int `env:"RATE_LIMIT_RPM" envDefault:"20"`
+	RateLimitBurst int `env:"RATE_LIMIT_BURST" envDefault:"5"`
+	// TrustForwardedFor uses the left-most X-Forwarded-For entry as the client
+	// IP. Enable only when a trusted proxy or broker sets that header, otherwise
+	// a client can spoof its IP.
+	TrustForwardedFor bool `env:"TRUST_FORWARDED_FOR" envDefault:"false"`
+
 	// SessionTTL is how long an idle conversation is kept in memory.
 	SessionTTL time.Duration `env:"SESSION_TTL" envDefault:"30m"`
 

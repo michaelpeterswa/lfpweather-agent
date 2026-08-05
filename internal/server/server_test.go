@@ -11,7 +11,7 @@ import (
 
 func TestChatValidation(t *testing.T) {
 	// A nil agent is fine: these requests are rejected before the agent runs.
-	h := New(nil, nil, 0).Handler()
+	h := New(nil, nil, Options{}).Handler()
 
 	tests := []struct {
 		name string
@@ -35,7 +35,7 @@ func TestChatValidation(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	h := New(nil, nil, 0).Handler()
+	h := New(nil, nil, Options{}).Handler()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
