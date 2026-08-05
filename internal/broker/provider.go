@@ -9,6 +9,9 @@ type Provider interface {
 	Acquire(ctx context.Context, sessionID string) (baseURL string, err error)
 	// Release tears down the backing resource for a session, if any.
 	Release(sessionID string)
+	// Targets returns the base URLs of the currently active agents, keyed by a
+	// stable id, for usage polling.
+	Targets() map[string]string
 	// Close releases all resources.
 	Close(ctx context.Context)
 }
@@ -29,5 +32,9 @@ func (p *DirectProvider) Acquire(_ context.Context, _ string) (string, error) {
 }
 
 func (p *DirectProvider) Release(_ string) {}
+
+func (p *DirectProvider) Targets() map[string]string {
+	return map[string]string{"direct": p.target}
+}
 
 func (p *DirectProvider) Close(_ context.Context) {}

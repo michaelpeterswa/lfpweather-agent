@@ -46,7 +46,12 @@ func main() {
 	}
 	defer provider.Close(context.Background())
 
-	srv := broker.NewServer(provider, c.MaxBodyBytes)
+	// Daily token budget: poll each agent's /usage and aggregate. The poller runs
+	// even when the budget is disabled so /usage still reports the daily total.
+	budgetTracker := broker.NewBudgetTracker(c.DailyTokenBudget)
+	go broker.NewUsagePoller(provider, budgetTracker, c.UsagePollInterval).Run(reaperStop)
+
+	srv := broker.NewServer(provider, c.MaxBodyBytes, budgetTracker)
 
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", c.Port),

@@ -31,7 +31,7 @@ func TestProxyStreamsFromAgent(t *testing.T) {
 	agent := fakeAgent(t)
 	defer agent.Close()
 
-	h := NewServer(NewDirectProvider(agent.URL), 65536).Handler()
+	h := NewServer(NewDirectProvider(agent.URL), 65536, nil).Handler()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(`{"session_id":"tab-1","message":"hi"}`))
 	rec := httptest.NewRecorder()
@@ -65,7 +65,7 @@ func TestProxyStreamsFromAgent(t *testing.T) {
 }
 
 func TestChatValidation(t *testing.T) {
-	h := NewServer(NewDirectProvider("http://unused"), 65536).Handler()
+	h := NewServer(NewDirectProvider("http://unused"), 65536, nil).Handler()
 
 	tests := []struct {
 		name string
@@ -88,7 +88,7 @@ func TestChatValidation(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
-	h := NewServer(NewDirectProvider("http://unused"), 65536).Handler()
+	h := NewServer(NewDirectProvider("http://unused"), 65536, nil).Handler()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

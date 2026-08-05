@@ -14,11 +14,13 @@ import (
 type Server struct {
 	provider Provider
 	maxBody  int64
+	budget   *BudgetTracker // nil disables the daily budget
 }
 
-// NewServer builds a broker HTTP server.
-func NewServer(provider Provider, maxBody int64) *Server {
-	return &Server{provider: provider, maxBody: maxBody}
+// NewServer builds a broker HTTP server. A nil budget disables the daily
+// token ceiling and reports zeros on /usage.
+func NewServer(provider Provider, maxBody int64, budget *BudgetTracker) *Server {
+	return &Server{provider: provider, maxBody: maxBody, budget: budget}
 }
 
 // Handler returns the HTTP handler with all routes registered.
@@ -27,6 +29,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat", s.handleChat)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleHealth)
+	mux.HandleFunc("GET /usage", s.handleUsage)
 	return mux
 }
 
@@ -50,6 +53,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SessionID == "" {
 		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Daily budget: past the ceiling, degrade gracefully instead of spending
+	// more (and instead of spinning up a fresh sandbox).
+	if s.budget != nil && s.budget.Exceeded() {
+		writeDegrade(w)
 		return
 	}
 
@@ -91,4 +101,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// handleUsage reports the daily token budget state.
+func (s *Server) handleUsage(w http.ResponseWriter, _ *http.Request) {
+	snap := BudgetSnapshot{Remaining: -1}
+	if s.budget != nil {
+		snap = s.budget.Snapshot()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(snap); err != nil {
+		slog.Error("failed to write usage", slog.String("error", err.Error()))
+	}
+}
+
+// writeDegrade returns a well-formed SSE stream carrying a friendly "resting"
+// message, so the chat UI renders it like any other reply.
+func writeDegrade(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.WriteHeader(http.StatusOK)
+	const msg = `{"type":"error","text":"The assistant is resting for today — check back tomorrow, or explore the dashboard."}`
+	_, _ = io.WriteString(w, "event: error\ndata: "+msg+"\n\n")
+	_, _ = io.WriteString(w, "event: done\ndata: {}\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
