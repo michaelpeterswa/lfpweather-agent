@@ -30,10 +30,18 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
+      # The prebuilt golangci-lint binaries are built with an older Go than this
+      # module targets (its Agent Sandbox / client-go dependencies require go
+      # 1.26), so the downloaded binary refuses to lint it. Build golangci-lint
+      # from source with the project toolchain instead.
+      - name: Install golangci-lint
+        run: |
+          pkg=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          go install "$pkg"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          args: --timeout=5m --enable=bodyclose
+        run: golangci-lint run --timeout=5m
 
   yamllint:
     runs-on: ubuntu-latest
