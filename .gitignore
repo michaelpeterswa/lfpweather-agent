@@ -1,0 +1,17 @@
+# Binaries
+/bin/
+*.exe
+lfpweather-agent
+
+# Test and coverage output
+*.out
+coverage.*
+
+# Env files
+.env
+.env.*
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
