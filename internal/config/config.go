@@ -44,8 +44,10 @@ type Config struct {
 	// SessionTTL is how long an idle conversation is kept in memory.
 	SessionTTL time.Duration `env:"SESSION_TTL" envDefault:"30m"`
 
-	// RequestTimeout bounds one user message end to end.
-	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"90s"`
+	// RequestTimeout bounds one user message end to end, across every tool turn
+	// and model stream. 90s was too tight: a multi-turn answer over a large
+	// session history can pass it and trip a context deadline mid-stream.
+	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"120s"`
 
 	// ShutdownTimeout bounds the graceful drain on SIGTERM.
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"15s"`
