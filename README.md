@@ -119,7 +119,19 @@ Two provider modes:
 | `SANDBOX_ROUTER_URL` | — | Sandbox mode: in-cluster sandbox-router URL (SDK `APIURL`). |
 | `SANDBOX_IDLE_TTL` | `15m` | Sandbox mode: delete a session's sandbox after this idle time. |
 | `MAX_BODY_BYTES` | `65536` | Max chat request body. |
+| `DAILY_TOKEN_BUDGET` | `0` | Input+output token ceiling per UTC day across all sessions. Past it the broker degrades gracefully. `0` disables. |
+| `USAGE_POLL_INTERVAL` | `30s` | How often the broker reads each agent's `/usage`. |
 | `PORT` | `8080` | HTTP listen port. |
+
+### Daily token budget
+
+The broker polls each active agent's `GET /usage`, sums the per-session token
+deltas into a daily total (reset at UTC midnight), and once the total reaches
+`DAILY_TOKEN_BUDGET` returns a friendly "the assistant is resting" SSE instead of
+proxying to an agent — a per-day ceiling below the Anthropic account's monthly
+cap. The broker's own `GET /usage` reports the daily total, budget, and
+remaining. The budget is on input + output tokens (cached reads are ~0.1x
+price); `0` disables enforcement while still tracking usage for observability.
 
 Run the broker in direct mode against a local agent:
 

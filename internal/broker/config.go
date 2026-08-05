@@ -33,6 +33,12 @@ type Config struct {
 	// MaxBodyBytes bounds a chat request body.
 	MaxBodyBytes int64 `env:"MAX_BODY_BYTES" envDefault:"65536"`
 
+	// DailyTokenBudget is the input+output token ceiling per UTC day across all
+	// sessions. Past it the broker degrades gracefully. 0 disables the budget.
+	DailyTokenBudget int64 `env:"DAILY_TOKEN_BUDGET" envDefault:"0"`
+	// UsagePollInterval is how often the broker reads each agent's /usage.
+	UsagePollInterval time.Duration `env:"USAGE_POLL_INTERVAL" envDefault:"30s"`
+
 	// ShutdownTimeout bounds the graceful drain on SIGTERM.
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"15s"`
 }

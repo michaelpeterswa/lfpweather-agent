@@ -101,6 +101,17 @@ func (p *SandboxProvider) Acquire(ctx context.Context, sessionID string) (string
 	return baseURL, nil
 }
 
+// Targets returns the agent base URL of every active session.
+func (p *SandboxProvider) Targets() map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]string, len(p.sessions))
+	for id, e := range p.sessions {
+		out[id] = e.baseURL
+	}
+	return out
+}
+
 // Release deletes a session's sandbox immediately.
 func (p *SandboxProvider) Release(sessionID string) {
 	p.mu.Lock()
