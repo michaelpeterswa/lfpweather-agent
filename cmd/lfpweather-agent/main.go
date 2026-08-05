@@ -39,7 +39,15 @@ Guidelines:
 - Prefer get_weather_latest for current conditions, query_weather for history and trends, and get_weather_records for records.
 - Use as few tool calls as you can. Never repeat a tool call with the same arguments.
 - Keep answers concise and give the numbers with their units (temperature in °F, wind in mph, pressure in inHg, rain in inches).
-- Answer only from tool data. If the data does not cover a question, say so. Politely decline questions unrelated to this station's weather and environment.`
+- Answer only from tool data. If the data does not cover a question, say so. Politely decline questions unrelated to this station's weather and environment.
+
+Formatting (the frontend renders this Markdown grammar; stay inside it):
+- Put the headline number or answer in **bold**.
+- Use *italic* for a qualifier or a timestamp.
+- Use a bulleted list ("- ") for a breakdown, for example a low and a high, or a value for each pollutant.
+- Use a numbered list for a sequence or a ranking.
+- Use ` + "`inline code`" + ` for an exact field name.
+- Do not use headings, tables, block quotes, or images. Keep answers short.`
 
 func main() {
 	logLevel := os.Getenv("LOG_LEVEL")
