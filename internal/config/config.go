@@ -51,6 +51,16 @@ type Config struct {
 
 	// ShutdownTimeout bounds the graceful drain on SIGTERM.
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"15s"`
+
+	// Telemetry. Metrics and traces push over OTLP gRPC to
+	// OTEL_EXPORTER_OTLP_ENDPOINT (read by the exporter). Both default off, so a
+	// sandbox runs without a collector until the environment enables them.
+	MetricsEnabled    bool    `env:"METRICS_ENABLED" envDefault:"false"`
+	MetricsPort       int     `env:"METRICS_PORT" envDefault:"8081"`
+	TracingEnabled    bool    `env:"TRACING_ENABLED" envDefault:"false"`
+	TracingSampleRate float64 `env:"TRACING_SAMPLERATE" envDefault:"0.05"`
+	TracingService    string  `env:"TRACING_SERVICE" envDefault:"lfpweather-agent"`
+	TracingVersion    string  `env:"TRACING_VERSION"`
 }
 
 // NewConfig parses the configuration from the environment.

@@ -14,6 +14,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/michaelpeterswa/lfpweather-agent/internal/agent"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/config"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/logging"
@@ -21,6 +23,7 @@ import (
 	"github.com/michaelpeterswa/lfpweather-agent/internal/ratelimit"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/server"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/session"
+	"github.com/michaelpeterswa/lfpweather-agent/internal/telemetry"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/usage"
 )
 
@@ -71,6 +74,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	traceVersion := c.TracingVersion
+	if traceVersion == "" {
+		traceVersion = config.AppVersion
+	}
+	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
+		MetricsEnabled: c.MetricsEnabled,
+		MetricsPort:    c.MetricsPort,
+		TracingEnabled: c.TracingEnabled,
+		SampleRate:     c.TracingSampleRate,
+		Service:        c.TracingService,
+		Version:        traceVersion,
+	})
+	if err != nil {
+		slog.Error("could not init telemetry", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer func() { _ = shutdownTelemetry(context.Background()) }()
+
 	// Connect to the MCP server and discover its tools once at startup.
 	mcp, err := mcpclient.New(ctx, c.MCPURL, c.MCPBearerToken, config.AppVersion)
 	if err != nil {
@@ -80,7 +101,12 @@ func main() {
 	defer func() { _ = mcp.Close() }()
 	slog.Info("connected to mcp server", slog.Int("tools", len(mcp.Tools())))
 
-	anthropicClient := anthropic.NewClient(option.WithAPIKey(c.AnthropicAPIKey))
+	// Wrap the Anthropic HTTP transport so each model call is a client span and
+	// carries trace context. This is a no-op when tracing is disabled.
+	anthropicClient := anthropic.NewClient(
+		option.WithAPIKey(c.AnthropicAPIKey),
+		option.WithHTTPClient(&http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}),
+	)
 
 	systemPrompt := defaultSystemPrompt
 	if c.SystemPrompt != "" {

@@ -12,6 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/michaelpeterswa/lfpweather-agent/internal/agent"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/ratelimit"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/session"
@@ -28,24 +35,45 @@ type Options struct {
 
 // Server wires the agent, the session store, and the HTTP handlers.
 type Server struct {
-	agent   *agent.Agent
-	store   *session.Store
-	timeout time.Duration
-	limiter *ratelimit.Limiter
-	usage   *usage.Tracker
-	trustXF bool
+	agent       *agent.Agent
+	store       *session.Store
+	timeout     time.Duration
+	limiter     *ratelimit.Limiter
+	usage       *usage.Tracker
+	trustXF     bool
+	reqDuration metric.Float64Histogram
+	tracer      trace.Tracer
 }
 
 // New builds a Server.
 func New(a *agent.Agent, store *session.Store, opts Options) *Server {
-	return &Server{
-		agent:   a,
-		store:   store,
-		timeout: opts.Timeout,
-		limiter: opts.Limiter,
-		usage:   opts.Usage,
-		trustXF: opts.TrustForwardedFor,
+	reqDuration, err := otel.Meter("lfpweather-agent").Float64Histogram(
+		"agent.request.duration",
+		metric.WithDescription("Time to answer one user message, by outcome."),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		slog.Warn("could not create request duration histogram", slog.String("error", err.Error()))
 	}
+	return &Server{
+		agent:       a,
+		store:       store,
+		timeout:     opts.Timeout,
+		limiter:     opts.Limiter,
+		usage:       opts.Usage,
+		trustXF:     opts.TrustForwardedFor,
+		reqDuration: reqDuration,
+		tracer:      otel.Tracer("lfpweather-agent"),
+	}
+}
+
+// recordRequest records how long one answered message took and its outcome
+// (ok, error, or timeout).
+func (s *Server) recordRequest(ctx context.Context, d time.Duration, outcome string) {
+	if s.reqDuration == nil {
+		return
+	}
+	s.reqDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 
 // Handler returns the HTTP handler with all routes registered.
@@ -137,16 +165,32 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	sess.Mu.Lock()
 	defer sess.Mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
+	// Continue the broker's trace, then span this request. The span is created by
+	// hand rather than by wrapping the handler with otelhttp, so the streaming
+	// ResponseWriter keeps its http.Flusher for SSE.
+	reqCtx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	reqCtx, span := s.tracer.Start(reqCtx, "agent.chat", trace.WithAttributes(attribute.String("session.id", req.SessionID)))
+	defer span.End()
+
+	ctx, cancel := context.WithTimeout(reqCtx, s.timeout)
 	defer cancel()
 
+	start := time.Now()
 	newHistory, err := s.agent.Run(ctx, sess.History, req.Message, emit)
+	outcome := "ok"
 	if err != nil {
+		outcome = "error"
+		if ctx.Err() == context.DeadlineExceeded {
+			outcome = "timeout"
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, outcome)
 		slog.Error("agent run failed", slog.String("session", req.SessionID), slog.String("error", err.Error()))
 		emit(agent.Event{Type: agent.EventError, Text: "the assistant hit an error"})
-		return
+	} else {
+		sess.History = newHistory
 	}
-	sess.History = newHistory
+	s.recordRequest(reqCtx, time.Since(start), outcome)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
