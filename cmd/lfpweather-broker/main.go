@@ -14,6 +14,7 @@ import (
 
 	"github.com/michaelpeterswa/lfpweather-agent/internal/broker"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/logging"
+	"github.com/michaelpeterswa/lfpweather-agent/internal/telemetry"
 )
 
 func main() {
@@ -37,6 +38,20 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
+		MetricsEnabled: c.MetricsEnabled,
+		MetricsPort:    c.MetricsPort,
+		TracingEnabled: c.TracingEnabled,
+		SampleRate:     c.TracingSampleRate,
+		Service:        c.TracingService,
+		Version:        c.TracingVersion,
+	})
+	if err != nil {
+		slog.Error("could not init telemetry", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer func() { _ = shutdownTelemetry(context.Background()) }()
 
 	reaperStop := make(chan struct{})
 	provider, err := buildProvider(ctx, c, reaperStop)

@@ -7,9 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/mark3labs/mcp-go/mcp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/michaelpeterswa/lfpweather-agent/internal/usage"
 )
 
@@ -50,6 +56,8 @@ type Agent struct {
 	maxTok   int64
 	maxTurns int
 	usage    *usage.Tracker
+	metrics  *agentMetrics
+	tracer   trace.Tracer
 }
 
 // Options configures an Agent.
@@ -75,6 +83,8 @@ func New(client anthropic.Client, opts Options) *Agent {
 		maxTok:   opts.MaxTokens,
 		maxTurns: opts.MaxTurns,
 		usage:    opts.Usage,
+		metrics:  newAgentMetrics(),
+		tracer:   otel.Tracer("lfpweather-agent"),
 	}
 }
 
@@ -82,6 +92,9 @@ func New(client anthropic.Client, opts Options) *Agent {
 // the updated history. Assistant text and tool activity are delivered through
 // emit as they happen. emit is called only from the calling goroutine.
 func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userText string, emit func(Event)) ([]anthropic.MessageParam, error) {
+	ctx, span := a.tracer.Start(ctx, "agent.run", trace.WithAttributes(attribute.String("llm.model", a.model)))
+	defer span.End()
+
 	history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(userText)))
 
 	var run usage.Snapshot
@@ -159,6 +172,14 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 		slog.Bool("completed", completed),
 	)
 
+	a.metrics.recordRun(ctx, run.InputTokens, run.OutputTokens, run.CacheReadTokens, run.CacheCreationTokens, run.Requests)
+	span.SetAttributes(
+		attribute.Int64("llm.turns", run.Requests),
+		attribute.Int64("llm.tokens.input", run.InputTokens),
+		attribute.Int64("llm.tokens.output", run.OutputTokens),
+		attribute.Bool("llm.completed", completed),
+	)
+
 	if !completed {
 		// The loop hit the turn cap while the model still wanted tools.
 		emit(Event{Type: EventError, Text: "reached the step limit for one question; ask a narrower question"})
@@ -171,17 +192,27 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 // callTool decodes the model's tool input and runs the MCP tool, turning any
 // transport error into an error tool result the model can recover from.
 func (a *Agent) callTool(ctx context.Context, name string, input json.RawMessage) (string, bool) {
+	ctx, span := a.tracer.Start(ctx, "agent.tool.call", trace.WithAttributes(attribute.String("tool", name)))
+	defer span.End()
+	start := time.Now()
+
 	var args map[string]any
 	if len(input) > 0 {
 		if err := json.Unmarshal(input, &args); err != nil {
+			span.SetStatus(codes.Error, "invalid tool input")
+			a.metrics.recordTool(ctx, name, time.Since(start), true)
 			return fmt.Sprintf("invalid tool input: %v", err), true
 		}
 	}
 
 	text, isErr, err := a.tools.Call(ctx, name, args)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "tool call failed")
+		a.metrics.recordTool(ctx, name, time.Since(start), true)
 		slog.Error("tool call failed", slog.String("tool", name), slog.String("error", err.Error()))
 		return fmt.Sprintf("tool %q failed: %v", name, err), true
 	}
+	a.metrics.recordTool(ctx, name, time.Since(start), isErr)
 	return text, isErr
 }

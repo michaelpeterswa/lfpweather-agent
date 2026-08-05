@@ -6,11 +6,13 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Client is a connected MCP session with a cached tool list.
@@ -22,7 +24,11 @@ type Client struct {
 // New connects to the MCP server at url, initializes the session, and lists the
 // available tools. A non-empty bearer token is sent as an Authorization header.
 func New(ctx context.Context, url, bearerToken, clientVersion string) (*Client, error) {
-	var opts []transport.StreamableHTTPCOption
+	// Wrap the transport so each MCP call carries trace context to the server
+	// and is a client span. A no-op when tracing is disabled.
+	opts := []transport.StreamableHTTPCOption{
+		transport.WithHTTPBasicClient(&http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}),
+	}
 	if bearerToken != "" {
 		opts = append(opts, transport.WithHTTPHeaders(map[string]string{
 			"Authorization": "Bearer " + bearerToken,
