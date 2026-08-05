@@ -16,10 +16,16 @@ Browser ── SSE ── Next route handler ── SSE ── broker ── SSE
                                                                   └─ lfpweather-mcp (streamable HTTP) ── lfpweather-api
 ```
 
-This service is the agent itself. It is designed to run inside a Kubernetes
-Agent Sandbox, one instance per conversation, fronted by a broker that manages
-sandbox lifecycle. It reaches the MCP server over in-cluster DNS; the only
-egress off the cluster is the Anthropic API call.
+This repository holds **two binaries**:
+
+- **`cmd/lfpweather-agent`** — the agent. Runs inside a Kubernetes Agent
+  Sandbox, one instance per conversation. It reaches the MCP server over
+  in-cluster DNS; the only egress off the cluster is the Anthropic API call.
+- **`cmd/lfpweather-broker`** — the broker. A long-lived Deployment that maps a
+  browser session to an agent and reverse-proxies the streaming chat. See
+  [Broker](#broker) below.
+
+The rest of this document describes the agent; the broker has its own section.
 
 ## HTTP API
 
@@ -83,6 +89,52 @@ curl -N http://localhost:8091/v1/chat \
   -H 'content-type: application/json' \
   -d '{"session_id":"tab-1","message":"what is the record high this year?"}'
 ```
+
+## Broker
+
+`cmd/lfpweather-broker` sits between the frontend and the agents. For each
+`POST /v1/chat`, it resolves the `session_id` to an agent and reverse-proxies
+the request, streaming the SSE response straight back (no buffering).
+
+Two provider modes:
+
+- **`direct`** — every session proxies to a single `AGENT_URL`. For local
+  development and testing against one agent process.
+- **`sandbox`** — each session gets its own Agent Sandbox
+  ([kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)).
+  The broker creates a sandbox on first message, reaches the agent at the pod IP
+  on `AGENT_PORT`, reuses it for the session, and the idle reaper deletes
+  sandboxes for closed tabs. Requires a network policy allowing broker → sandbox
+  pod and sandbox → MCP / Anthropic.
+
+### Broker configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PROVIDER_MODE` | `direct` | `direct` or `sandbox`. |
+| `AGENT_URL` | — | Direct mode: the single agent to proxy to. |
+| `WARM_POOL_NAME` | — | Sandbox mode: the `SandboxWarmPool` to draw from (required). |
+| `NAMESPACE` | `default` | Sandbox mode: namespace for the sandbox claims. |
+| `AGENT_PORT` | `8080` | Sandbox mode: the agent's HTTP port inside the pod. |
+| `SANDBOX_ROUTER_URL` | — | Sandbox mode: in-cluster sandbox-router URL (SDK `APIURL`). |
+| `SANDBOX_IDLE_TTL` | `15m` | Sandbox mode: delete a session's sandbox after this idle time. |
+| `MAX_BODY_BYTES` | `65536` | Max chat request body. |
+| `PORT` | `8080` | HTTP listen port. |
+
+Run the broker in direct mode against a local agent:
+
+```sh
+PROVIDER_MODE=direct AGENT_URL=http://localhost:8091 PORT=8092 \
+  go run ./cmd/lfpweather-broker
+```
+
+The Dockerfile builds both binaries into the image; the broker Deployment
+overrides the entrypoint with `/usr/local/bin/lfpweather-broker`.
+
+> **Status:** the broker's proxy, provider abstraction, and direct mode are done
+> and tested end to end (broker → agent → MCP). The sandbox provider is
+> implemented against the Agent Sandbox Go SDK and compiles, but has not yet
+> been validated against a live cluster.
 
 ## Cost controls
 
