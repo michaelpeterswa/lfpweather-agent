@@ -1,0 +1,85 @@
+---
+on: [pull_request] #  yamllint disable-line rule:truthy
+name: main
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - run: npm install --save-dev @commitlint/{config-conventional,cli}
+      - run: npx commitlint --from=${{ github.event.pull_request.base.sha }}
+
+  golangci-lint:
+    strategy:
+      matrix:
+        go-version: [1.26.x]
+        os: [ubuntu-latest]
+    name: lint
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      # The prebuilt golangci-lint binaries are built with an older Go than this
+      # module targets (its Agent Sandbox / client-go dependencies require go
+      # 1.26), so the downloaded binary refuses to lint it. Build golangci-lint
+      # from source with the project toolchain instead.
+      - name: Install golangci-lint
+        run: |
+          pkg=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          go install "$pkg"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: golangci-lint
+        run: golangci-lint run --timeout=5m
+
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: yaml-lint
+        uses: ibiqlik/action-yamllint@v3
+
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  test:
+    strategy:
+      matrix:
+        go-version: [1.26.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test
+        run: go test ./...

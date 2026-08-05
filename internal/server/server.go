@@ -7,32 +7,90 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/michaelpeterswa/lfpweather-agent/internal/agent"
+	"github.com/michaelpeterswa/lfpweather-agent/internal/ratelimit"
 	"github.com/michaelpeterswa/lfpweather-agent/internal/session"
+	"github.com/michaelpeterswa/lfpweather-agent/internal/usage"
 )
+
+// Options configures a Server.
+type Options struct {
+	Timeout           time.Duration
+	Limiter           *ratelimit.Limiter // nil disables rate limiting
+	Usage             *usage.Tracker     // nil serves zeros on /usage
+	TrustForwardedFor bool
+}
 
 // Server wires the agent, the session store, and the HTTP handlers.
 type Server struct {
 	agent   *agent.Agent
 	store   *session.Store
 	timeout time.Duration
+	limiter *ratelimit.Limiter
+	usage   *usage.Tracker
+	trustXF bool
 }
 
 // New builds a Server.
-func New(a *agent.Agent, store *session.Store, timeout time.Duration) *Server {
-	return &Server{agent: a, store: store, timeout: timeout}
+func New(a *agent.Agent, store *session.Store, opts Options) *Server {
+	return &Server{
+		agent:   a,
+		store:   store,
+		timeout: opts.Timeout,
+		limiter: opts.Limiter,
+		usage:   opts.Usage,
+		trustXF: opts.TrustForwardedFor,
+	}
 }
 
 // Handler returns the HTTP handler with all routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat", s.handleChat)
+	mux.HandleFunc("POST /v1/chat", s.rateLimited(s.handleChat))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleHealth)
+	mux.HandleFunc("GET /usage", s.handleUsage)
 	return mux
+}
+
+// rateLimited wraps a handler with per-client-IP token-bucket limiting. On a
+// limit hit it returns 429 before any streaming starts.
+func (s *Server) rateLimited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.limiter != nil {
+			ip := s.clientIP(r)
+			if !s.limiter.Allow(ip) {
+				slog.Warn("rate limited", slog.String("ip", ip))
+				w.Header().Set("Retry-After", "5")
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// clientIP resolves the caller's IP, honoring the left-most X-Forwarded-For
+// entry only when the proxy is trusted.
+func (s *Server) clientIP(r *http.Request) string {
+	if s.trustXF {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first, _, ok := strings.Cut(xff, ","); ok {
+				return strings.TrimSpace(first)
+			}
+			return strings.TrimSpace(xff)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 type chatRequest struct {
@@ -94,6 +152,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// handleUsage reports cumulative token usage since process start — the basis
+// for budget monitoring.
+func (s *Server) handleUsage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(s.usage.Snapshot()); err != nil {
+		slog.Error("failed to write usage", slog.String("error", err.Error()))
+	}
 }
 
 // writeSSE encodes one event as an SSE frame: an event: line naming the type
