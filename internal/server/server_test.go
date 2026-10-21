@@ -1,10 +1,13 @@
 package server
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/michaelpeterswa/lfpweather-agent/internal/agent"
 )
@@ -57,5 +60,18 @@ func TestWriteSSE(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "\n\n") {
 		t.Errorf("frame = %q, want it to end with a blank line", got)
+	}
+}
+
+func TestUserErrorText(t *testing.T) {
+	busy := &agent.BusyError{RetryAfter: 20 * time.Second, Err: errors.New("429")}
+	if got := userErrorText(fmt.Errorf("wrapped: %w", busy), "error"); !strings.Contains(got, "20 seconds") {
+		t.Errorf("busy text = %q", got)
+	}
+	if got := userErrorText(errors.New("deadline"), "timeout"); !strings.Contains(got, "took too long") {
+		t.Errorf("timeout text = %q", got)
+	}
+	if got := userErrorText(errors.New("boom"), "error"); !strings.Contains(got, "Try again") {
+		t.Errorf("error text = %q", got)
 	}
 }

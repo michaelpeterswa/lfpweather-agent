@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -106,6 +107,12 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 			MaxTokens: a.maxTok,
 			Messages:  history,
 			Tools:     a.toolDefs,
+			// Cache the conversation so far, not just the fixed prefix: the
+			// top-level marker lands on the last cacheable block, so each
+			// request reads the earlier history back from cache. Cache reads
+			// don't count toward the input-token rate limit, which is what a
+			// follow-up re-sending a large history used to trip.
+			CacheControl: anthropic.NewCacheControlEphemeralParam(),
 		}
 		if a.system != "" {
 			// Cache the system prompt and, in render order, the tool schemas
@@ -118,21 +125,9 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 			}}
 		}
 
-		stream := a.client.Messages.NewStreaming(ctx, params)
-		msg := anthropic.Message{}
-		for stream.Next() {
-			event := stream.Current()
-			if err := msg.Accumulate(event); err != nil {
-				return history, fmt.Errorf("accumulate stream: %w", err)
-			}
-			if delta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
-				if td, ok := delta.Delta.AsAny().(anthropic.TextDelta); ok && td.Text != "" {
-					emit(Event{Type: EventToken, Text: td.Text})
-				}
-			}
-		}
-		if err := stream.Err(); err != nil {
-			return history, fmt.Errorf("model stream: %w", err)
+		msg, err := a.stream(ctx, params, emit)
+		if err != nil {
+			return history, err
 		}
 
 		a.usage.Record(msg.Usage.InputTokens, msg.Usage.OutputTokens, msg.Usage.CacheReadInputTokens, msg.Usage.CacheCreationInputTokens)
@@ -158,7 +153,7 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 			emit(Event{Type: EventTool, Tool: tu.Name, Status: "start"})
 			out, isErr := a.callTool(ctx, tu.Name, tu.Input)
 			emit(Event{Type: EventTool, Tool: tu.Name, Status: "done"})
-			results = append(results, anthropic.NewToolResultBlock(tu.ID, out, isErr))
+			results = append(results, anthropic.NewToolResultBlock(tu.ID, truncateToolResult(out), isErr))
 		}
 		history = append(history, anthropic.NewUserMessage(results...))
 	}
@@ -187,6 +182,47 @@ func (a *Agent) Run(ctx context.Context, history []anthropic.MessageParam, userT
 
 	emit(Event{Type: EventDone})
 	return history, nil
+}
+
+// stream makes one model call, emitting assistant text as it arrives. SDK
+// retries are off (see classifyModelError): a 429 comes back at once as a
+// *BusyError, and an overloaded or server error is retried once, provided no
+// text has reached the user yet.
+func (a *Agent) stream(ctx context.Context, params anthropic.MessageNewParams, emit func(Event)) (anthropic.Message, error) {
+	for attempt := 0; ; attempt++ {
+		stream := a.client.Messages.NewStreaming(ctx, params, option.WithMaxRetries(0))
+		msg := anthropic.Message{}
+		emitted := false
+		for stream.Next() {
+			event := stream.Current()
+			if err := msg.Accumulate(event); err != nil {
+				return msg, fmt.Errorf("accumulate stream: %w", err)
+			}
+			if delta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
+				if td, ok := delta.Delta.AsAny().(anthropic.TextDelta); ok && td.Text != "" {
+					emitted = true
+					emit(Event{Type: EventToken, Text: td.Text})
+				}
+			}
+		}
+		err := stream.Err()
+		if err == nil {
+			return msg, nil
+		}
+		busy, retryable := classifyModelError(err)
+		if busy != nil {
+			return msg, busy
+		}
+		if !retryable || emitted || attempt > 0 {
+			return msg, fmt.Errorf("model stream: %w", err)
+		}
+		slog.Warn("retrying model call", slog.String("error", err.Error()))
+		select {
+		case <-ctx.Done():
+			return msg, fmt.Errorf("model stream: %w", err)
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // callTool decodes the model's tool input and runs the MCP tool, turning any
