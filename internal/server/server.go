@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -68,7 +69,7 @@ func New(a *agent.Agent, store *session.Store, opts Options) *Server {
 }
 
 // recordRequest records how long one answered message took and its outcome
-// (ok, error, or timeout).
+// (ok, error, rate_limited, or timeout).
 func (s *Server) recordRequest(ctx context.Context, d time.Duration, outcome string) {
 	if s.reqDuration == nil {
 		return
@@ -180,17 +181,34 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	outcome := "ok"
 	if err != nil {
 		outcome = "error"
-		if ctx.Err() == context.DeadlineExceeded {
+		var busy *agent.BusyError
+		switch {
+		case errors.As(err, &busy):
+			outcome = "rate_limited"
+		case ctx.Err() == context.DeadlineExceeded:
 			outcome = "timeout"
 		}
 		span.RecordError(err)
 		span.SetStatus(codes.Error, outcome)
 		slog.Error("agent run failed", slog.String("session", req.SessionID), slog.String("error", err.Error()))
-		emit(agent.Event{Type: agent.EventError, Text: "the assistant hit an error"})
+		emit(agent.Event{Type: agent.EventError, Text: userErrorText(err, outcome)})
 	} else {
 		sess.History = newHistory
 	}
 	s.recordRequest(reqCtx, time.Since(start), outcome)
+}
+
+// userErrorText is what the person sees when a message fails. The session's
+// history is unchanged on any failure, so each one can be retried as is.
+func userErrorText(err error, outcome string) string {
+	var busy *agent.BusyError
+	switch {
+	case errors.As(err, &busy):
+		return busy.UserMessage()
+	case outcome == "timeout":
+		return "That took too long to answer. Try again, or ask something narrower."
+	}
+	return "The assistant hit an error. Try again in a moment."
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
